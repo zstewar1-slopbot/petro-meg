@@ -343,7 +343,10 @@ impl MegPath {
     ///     meg_path!("foo.txt"),
     /// );
     /// ```
-    pub fn with_extension(&self, extension: impl AsRef<str>) -> Result<MegPathBuf, MegPathError> {
+    pub fn with_extension(
+        &self,
+        extension: impl CoerceMegStr,
+    ) -> Result<MegPathBuf, MegPathError> {
         let mut buf = self.to_owned();
         buf.set_extension(extension)?;
         Ok(buf)
@@ -366,7 +369,7 @@ impl MegPath {
     /// ```
     pub fn with_added_extension(
         &self,
-        extension: impl AsRef<str>,
+        extension: impl CoerceMegStr,
     ) -> Result<MegPathBuf, MegPathError> {
         let mut buf = self.to_owned();
         buf.add_extension(extension)?;
@@ -649,24 +652,25 @@ impl MegPathBuf {
     /// Updates [`self.extension`] to `Some(extension)` or to `None` if `extension` is empty.
     ///
     /// Returns `Ok(false)` and does nothing if [`self.file_name`] is [`None`], returns `Ok(true)`
-    /// if the receiver can be changed, or returns an `Err(`[`MegPathError`]`)` (leaving `self`
-    /// unmodified) if `extension` or the resulting path would not be a valid [`MegPath`].
+    /// if the extension was updated (or cleared), or returns an `Err(`[`MegPathError`]`)` (leaving
+    /// `self` unmodified) if `extension` or the resulting path would not be a valid [`MegPath`].
     ///
     /// If [`self.extension`] is [`None`], the extension is added; otherwise it is replaced.
     ///
-    /// If `extension` is the empty string, [`self.extension`] will be [`None`] afterwards, and in
-    /// the case that the extension was previously [`Some`], the preceding `.` will also be removed
-    /// from [`self.file_name`]. If removing the extension would leave a component ending in `.` or
-    /// `' '` (for example, `"foo..txt"` -> `"foo."`), `Err(`[`MegPathError::InvalidComponent`]`)`
-    /// is returned and `self` is left unmodified.
+    /// If `extension` is the empty string, [`self.extension`] will be [`None`] afterwards (unless
+    /// the file has more than one extension; see below), and in the case that the extension was
+    /// previously [`Some`], the preceding `.` will also be removed from [`self.file_name`]. If
+    /// removing the extension would leave a component ending in `.` or `' '` (for example,
+    /// `"foo..txt"` -> `"foo."`), `Err(`[`MegPathError::InvalidComponent`]`)` is returned and
+    /// `self` is left unmodified.
     ///
     /// # Caveats
     ///
     /// The new `extension` may contain dots and will be used in its entirety as the new
     /// extension, provided it does not end in `.` or `' '` or contain invalid characters.
     ///
-    /// If the file stem contains internal dots (e.g., `foo.tar.gz`), diagnostic/multiple extensions
-    /// are replaced one at a time from the end.
+    /// If the path has more than one extension (the stem contains dots, e.g. `foo.tar.gz`), only
+    /// the last extension will be changed.
     ///
     /// [`self.extension`]: MegPath::extension
     /// [`self.file_name`]: MegPath::file_name
@@ -703,14 +707,18 @@ impl MegPathBuf {
     /// assert_eq!(p.set_extension("bad."), Err(MegPathError::InvalidComponent));
     /// assert_eq!(meg_path!("feel/the"), p.as_meg_path());
     /// ```
-    pub fn set_extension(&mut self, extension: impl AsRef<str>) -> Result<bool, MegPathError> {
-        let extension = AinStr::from_str(extension.as_ref())?;
+    pub fn set_extension(&mut self, extension: impl CoerceMegStr) -> Result<bool, MegPathError> {
+        let extension = extension.as_ain_str()?;
         validate_extension(extension)?;
         if self.file_name().is_none() {
             return Ok(false);
         }
+        // Calculate the exclusive end index of the file stem, excluding the dot separator for the
+        // file extension (adding 1 to ext.len() to include the dot).
         let stem_end = match self.extension() {
-            Some(ext) => self.len() - 1 - ext.len(),
+            Some(ext) => self.len() - (ext.len() + 1),
+            // We already have no extension so nothing to do.
+            None if extension.is_empty() => return Ok(true),
             None => self.len(),
         };
         if extension.is_empty() {
@@ -727,13 +735,13 @@ impl MegPathBuf {
         Ok(true)
     }
 
-    /// Appends to [`self.extension`], or sets it to `Some(extension)` if it is currently `None`.
+    /// Appends an extension to [`self.file_name`], separated by a `.`, without removing any
+    /// existing extension.
     ///
     /// Returns `Ok(false)` and does nothing if [`self.file_name`] is [`None`], returns `Ok(true)`
     /// if `extension` is empty or was appended, or returns an `Err(`[`MegPathError`]`)` (leaving
     /// `self` unmodified) if `extension` is not a valid [`MegPath`] extension.
     ///
-    /// [`self.extension`]: MegPath::extension
     /// [`self.file_name`]: MegPath::file_name
     ///
     /// # Examples
@@ -751,8 +759,8 @@ impl MegPathBuf {
     /// assert_eq!(p.add_extension(""), Ok(true));
     /// assert_eq!(meg_path!("feel/the.force.dark.side"), p.as_meg_path());
     /// ```
-    pub fn add_extension(&mut self, extension: impl AsRef<str>) -> Result<bool, MegPathError> {
-        let extension = AinStr::from_str(extension.as_ref())?;
+    pub fn add_extension(&mut self, extension: impl CoerceMegStr) -> Result<bool, MegPathError> {
+        let extension = extension.as_ain_str()?;
         validate_extension(extension)?;
         if self.file_name().is_none() {
             return Ok(false);
@@ -863,6 +871,68 @@ impl fmt::Debug for MegPathBuf {
 impl fmt::Display for MegPathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+/// Trait for types that can be converted to an [`&AinStr`][AinStr] for [`MegPath`] operations,
+/// skipping ASCII re-validation for types that are already known to be ASCII.
+pub trait CoerceMegStr {
+    /// Convert `self` to an [`&AinStr`][AinStr], returning [`MegPathError::NotAscii`] if `self`
+    /// contains non-ASCII characters.
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError>;
+}
+
+impl<T: CoerceMegStr + ?Sized> CoerceMegStr for &T {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        (**self).as_ain_str()
+    }
+}
+
+impl<T: CoerceMegStr + ?Sized> CoerceMegStr for &mut T {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        (**self).as_ain_str()
+    }
+}
+
+impl CoerceMegStr for AinStr {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(self)
+    }
+}
+
+impl CoerceMegStr for AinString {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(AinString::as_ain_str(self))
+    }
+}
+
+impl CoerceMegStr for AinChar {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(self.as_ref())
+    }
+}
+
+impl CoerceMegStr for MegPath {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(MegPath::as_ain_str(self))
+    }
+}
+
+impl CoerceMegStr for MegPathBuf {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(MegPath::as_ain_str(self))
+    }
+}
+
+impl CoerceMegStr for str {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(AinStr::from_str(self)?)
+    }
+}
+
+impl CoerceMegStr for String {
+    fn as_ain_str(&self) -> Result<&AinStr, MegPathError> {
+        Ok(AinStr::from_str(self)?)
     }
 }
 
@@ -1051,36 +1121,30 @@ mod tests {
     }
 
     #[test]
-    fn set_and_with_extension() {
+    fn test_set_extension() {
         let mut p = MegPathBuf::new();
-        assert_eq!(p.set_extension("alo"), Ok(false));
+        assert_eq!(p.set_extension("ext"), Ok(false));
         assert_eq!(p.as_meg_path(), MegPath::EMPTY);
-        assert_eq!(
-            MegPath::EMPTY.with_extension("alo"),
-            Ok(MegPathBuf::new())
-        );
 
-        let mut p = meg_path!("Data\\Art\\Models\\p_explosion_small00_dud").to_owned();
-        assert_eq!(p.set_extension("alo"), Ok(true));
+        let mut p = meg_path!("dir\\subdir\\sample_file").to_owned();
+        assert_eq!(p.set_extension("ext"), Ok(true));
+        assert_eq!(p.as_meg_path(), meg_path!("dir\\subdir\\sample_file.ext"));
+        assert_eq!(p.set_extension(ain!("other")), Ok(true));
         assert_eq!(
             p.as_meg_path(),
-            meg_path!("Data\\Art\\Models\\p_explosion_small00_dud.alo")
+            meg_path!("dir\\subdir\\sample_file.other")
         );
-        assert_eq!(p.set_extension("xml"), Ok(true));
-        assert_eq!(
-            p.as_meg_path(),
-            meg_path!("Data\\Art\\Models\\p_explosion_small00_dud.xml")
-        );
+        assert_eq!(p.set_extension(ain!('c')), Ok(true));
+        assert_eq!(p.as_meg_path(), meg_path!("dir\\subdir\\sample_file.c"));
         assert_eq!(p.set_extension(""), Ok(true));
-        assert_eq!(
-            p.as_meg_path(),
-            meg_path!("Data\\Art\\Models\\p_explosion_small00_dud")
-        );
+        assert_eq!(p.as_meg_path(), meg_path!("dir\\subdir\\sample_file"));
+        assert_eq!(p.set_extension(""), Ok(true));
+        assert_eq!(p.as_meg_path(), meg_path!("dir\\subdir\\sample_file"));
 
         // Leading dot file with no extension.
         let mut hidden = meg_path!("dir/.hidden").to_owned();
-        assert_eq!(hidden.set_extension("alo"), Ok(true));
-        assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden.alo"));
+        assert_eq!(hidden.set_extension("ext"), Ok(true));
+        assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden.ext"));
         assert_eq!(hidden.set_extension(""), Ok(true));
         assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden"));
 
@@ -1091,8 +1155,8 @@ mod tests {
             Err(MegPathError::InvalidComponent)
         );
         assert_eq!(double_dot.as_meg_path(), meg_path!("dir/foo..txt"));
-        assert_eq!(double_dot.set_extension("alo"), Ok(true));
-        assert_eq!(double_dot.as_meg_path(), meg_path!("dir/foo..alo"));
+        assert_eq!(double_dot.set_extension("ext"), Ok(true));
+        assert_eq!(double_dot.as_meg_path(), meg_path!("dir/foo..ext"));
 
         let mut space_before_dot = meg_path!("dir/foo .txt").to_owned();
         assert_eq!(
@@ -1102,7 +1166,7 @@ mod tests {
         assert_eq!(space_before_dot.as_meg_path(), meg_path!("dir/foo .txt"));
 
         // Invalid extension errors leave path unmodified.
-        let mut p = meg_path!("foo.alo").to_owned();
+        let mut p = meg_path!("foo.ext").to_owned();
         assert_eq!(p.set_extension("bar."), Err(MegPathError::InvalidComponent));
         assert_eq!(p.set_extension("bar "), Err(MegPathError::InvalidComponent));
         assert_eq!(p.set_extension("."), Err(MegPathError::InvalidComponent));
@@ -1110,35 +1174,78 @@ mod tests {
         assert_eq!(p.set_extension("a\\b"), Err(MegPathError::InvalidCharacter));
         assert_eq!(p.set_extension("a:b"), Err(MegPathError::InvalidCharacter));
         assert_eq!(p.set_extension("🦀"), Err(MegPathError::NotAscii));
-        assert_eq!(p.as_meg_path(), meg_path!("foo.alo"));
+        assert_eq!(p.as_meg_path(), meg_path!("foo.ext"));
     }
 
     #[test]
-    fn add_and_with_added_extension() {
-        let mut p = MegPathBuf::new();
-        assert_eq!(p.add_extension("alo"), Ok(false));
-        assert_eq!(p.as_meg_path(), MegPath::EMPTY);
+    fn test_with_extension() {
         assert_eq!(
-            MegPath::EMPTY.with_added_extension("alo"),
+            MegPath::EMPTY.with_extension("ext"),
             Ok(MegPathBuf::new())
         );
+        assert_eq!(
+            meg_path!("dir/sample_file").with_extension("ext"),
+            Ok(meg_path!("dir/sample_file.ext").to_owned())
+        );
+        assert_eq!(
+            meg_path!("dir/sample_file.old").with_extension(ain!("new")),
+            Ok(meg_path!("dir/sample_file.new").to_owned())
+        );
+        assert_eq!(
+            meg_path!("dir/sample_file.old").with_extension(""),
+            Ok(meg_path!("dir/sample_file").to_owned())
+        );
+        assert_eq!(
+            meg_path!("dir/foo..txt").with_extension(""),
+            Err(MegPathError::InvalidComponent)
+        );
+        assert_eq!(
+            meg_path!("dir/foo.txt").with_extension("bad."),
+            Err(MegPathError::InvalidComponent)
+        );
+    }
+
+    #[test]
+    fn test_add_extension() {
+        let mut p = MegPathBuf::new();
+        assert_eq!(p.add_extension("ext"), Ok(false));
+        assert_eq!(p.as_meg_path(), MegPath::EMPTY);
 
         let mut p = meg_path!("foo").to_owned();
         assert_eq!(p.add_extension("tar"), Ok(true));
         assert_eq!(p.as_meg_path(), meg_path!("foo.tar"));
-        assert_eq!(p.add_extension("gz"), Ok(true));
+        assert_eq!(p.add_extension(ain!("gz")), Ok(true));
         assert_eq!(p.as_meg_path(), meg_path!("foo.tar.gz"));
         assert_eq!(p.add_extension(""), Ok(true));
         assert_eq!(p.as_meg_path(), meg_path!("foo.tar.gz"));
-
-        assert_eq!(
-            meg_path!("foo").with_added_extension(ain!("alo")),
-            Ok(meg_path!("foo.alo").to_owned())
-        );
 
         assert_eq!(p.add_extension("bad."), Err(MegPathError::InvalidComponent));
         assert_eq!(p.add_extension("a/b"), Err(MegPathError::InvalidCharacter));
         assert_eq!(p.add_extension("🦀"), Err(MegPathError::NotAscii));
         assert_eq!(p.as_meg_path(), meg_path!("foo.tar.gz"));
+    }
+
+    #[test]
+    fn test_with_added_extension() {
+        assert_eq!(
+            MegPath::EMPTY.with_added_extension("ext"),
+            Ok(MegPathBuf::new())
+        );
+        assert_eq!(
+            meg_path!("foo").with_added_extension(ain!("ext")),
+            Ok(meg_path!("foo.ext").to_owned())
+        );
+        assert_eq!(
+            meg_path!("foo.tar").with_added_extension("gz"),
+            Ok(meg_path!("foo.tar.gz").to_owned())
+        );
+        assert_eq!(
+            meg_path!("foo.tar").with_added_extension(""),
+            Ok(meg_path!("foo.tar").to_owned())
+        );
+        assert_eq!(
+            meg_path!("foo.tar").with_added_extension("bad."),
+            Err(MegPathError::InvalidComponent)
+        );
     }
 }
