@@ -1143,8 +1143,12 @@ mod tests {
 
         // Leading dot file with no extension.
         let mut hidden = meg_path!("dir/.hidden").to_owned();
+        assert_eq!(hidden.set_extension(""), Ok(true));
+        assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden"));
         assert_eq!(hidden.set_extension("ext"), Ok(true));
         assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden.ext"));
+        assert_eq!(hidden.set_extension(""), Ok(true));
+        assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden"));
         assert_eq!(hidden.set_extension(""), Ok(true));
         assert_eq!(hidden.as_meg_path(), meg_path!("dir/.hidden"));
 
